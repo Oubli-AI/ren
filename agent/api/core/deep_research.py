@@ -548,21 +548,29 @@ ROLE_NOTES: Final[dict[str, str]] = {
         f"- {GRID_MARKDOWN}\n"
     ),
     "grid_builder": (
-        "grid.json is the spreadsheet the user gets: it opens in Ren as a sheet to sort, filter and calculate with, "
-        "and downloads as an Excel file. Write it with Python (`json.dump`), so it is valid JSON:\n"
+        "grid.json is the spreadsheet the user gets: it opens in Ren as an app over its rows (a card per row, a row "
+        "with what a tap on a cell starts, a form that adds a row or changes one) and as a sheet to sort, filter and "
+        "calculate with, and downloads as an Excel file. Write it with Python (`json.dump`), so it is valid JSON:\n"
         f"{GRID_JSON}\n"
-        "- One row per item the inquiry asks about and one column per fact, so every row reads on its own.\n"
+        "- One row per item the inquiry asks about and one column per fact, so every row reads on its own. The first "
+        "column names the item.\n"
         "- Numbers are numbers, never text with a unit or a separator: the unit goes in the header (\"Price (USD)\") "
         "and the column's number format shows it. A date is text as 2026-11-21.\n"
-        "- Whatever follows from other cells is a formula, never a typed result: totals, shares, differences, ranks, "
-        "and a summary sheet that reads the data sheet.\n"
+        "- A column holds one kind of value, written so a tap can start it: an email address, a phone number with its "
+        "country code (\"+1 415 555 0100\"), a link or a picture as its full https:// URL, a place in a column named "
+        "Address, yes or no as true or false.\n"
+        "- Whatever follows from other cells is a formula, never a typed result: shares, differences, ranks. A data "
+        "sheet holds only its header and its rows, so its totals are on a summary sheet, each over a whole column "
+        "(\"=SUM(Data!C:C)\"), and count a row added later.\n"
         "- Every data row ends with a Source column holding the reference numbers its facts came from, and the last "
         "sheet, Sources, lists references.md: number, title, URL.\n"
     ),
     "grid_qa": (
-        "Load grid.json with Python and check it: every sheet has a header and rows no wider than it, numbers are "
-        "numbers, every formula points at cells that exist and hold what it needs, and nothing that follows from "
-        "other cells is typed in. Then compare every value with research.md and every Source with references.md.\n"
+        "Load grid.json with Python and check it: every sheet has a header and rows no wider than it, a data sheet "
+        "holds only its header and its rows (its totals are on a summary sheet, over whole columns), a column holds "
+        "one kind of value, numbers are numbers, every formula points at cells that exist and hold what it needs, and "
+        "nothing that follows from other cells is typed in. Then compare every value with research.md and every "
+        "Source with references.md.\n"
     ),
     "deck_designer": (
         "Load your Slidev skills with the `skills` tool before you design (Deckcraft's references/art-direction.md, "
