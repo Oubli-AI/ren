@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
-  columnLetter, gridDisplay, gridFromJson, gridMarkdown, gridValue, gridWorkbook, normalizeGrid, readGrid, sheetCsv, starterGrid,
-  type Grid,
+  columnLetter, gridColumns, gridDisplay, gridFromJson, gridMarkdown, gridValue, gridWorkbook, normalizeGrid, readGrid, sheetCsv, starterGrid,
+  temporalSerial, temporalText,
+  type Grid, type GridSheet,
 } from './grid.ts'
 
 const GRID: Grid = {
@@ -124,4 +125,56 @@ test('a block holds a grid, and what it shows and its workbook only as a spreads
 
 test('a sheet as CSV quotes what needs it', () => {
   assert.equal(sheetCsv([['Name', 'Note'], ['Van, long', 'said "ok"'], ['Truck', 'line\nbreak']]), 'Name,Note\r\n"Van, long","said ""ok"""\r\nTruck,"line\nbreak"')
+})
+
+test('a sheet\'s columns are typed from its header and its cells, as AppSheet reads a sheet', () => {
+  const sheet: GridSheet = {
+    name: 'Leads',
+    formats: { C: '$#,##0.00', D: '0.0%', E: 'yyyy-mm-dd', K: 'h:mm' },
+    rows: [
+      ['Name', 'Units', 'Price', 'Share', 'Due', 'Email', 'Phone', 'Site', 'Photo', 'Office address', 'Opens', 'Won', 'Stage', 'Notes', 'Total', 'Mixed', null],
+      ['Acme', 3, 1500, 0.25, 46347, 'ann@acme.com', '+1 415 555 0100', 'https://acme.com', 'https://acme.com/logo.png', '1 Main St, Springfield', 0.375, true, 'New', 'Met at the fair.', '=B2*C2', 1],
+      ['Bolt', 1, 20.5, 0.5, 46348, 'bo@bolt.io', '(415) 555-0101', 'https://bolt.io/about', 'https://bolt.io/a.JPG?x=1', '2 Oak Ave', 0.5, false, 'Won', 'A first line\nand a second', '=B3*C3', 'one'],
+      ['Core', 2, 9, 0.1, null, 'c@core.dev', '+44 20 7946 0958', 'http://core.dev', 'https://core.dev/c.webp', '3 Elm Rd', 0.75, true, 'New', '', '=B4*C4', null],
+    ],
+  }
+  const values = sheet.rows.map((row, r) => row.map((cell, c) => (r > 0 && c === 14 ? [4500, 20.5, 18][r - 1] ?? null : cell)))
+  const columns = gridColumns(sheet, values)
+  assert.deepEqual(columns.map((column) => column.type), [
+    'text', 'number', 'price', 'percent', 'date', 'email', 'phone', 'url', 'image', 'address', 'time', 'yesno', 'enum', 'longtext', 'number', 'text', 'text',
+  ])
+  assert.deepEqual(columns[12], { name: 'Stage', type: 'enum', options: ['New', 'Won'] })
+  // A column without a header goes by its letter.
+  assert.equal(columns[16]?.name, 'Q')
+  // Before a spreadsheet has calculated it, a column of formulas has no values to type it by.
+  assert.equal(gridColumns(sheet)[14]?.type, 'text')
+  assert.deepEqual(gridColumns({ name: 'Empty', rows: [] }), [])
+})
+
+test('dates, times and places written as text are typed too, and a number\'s format tells money from a date', () => {
+  const typed = (cells: (string | number)[], format?: string) =>
+    gridColumns({ name: 'S', rows: [['Column'], ...cells.map((cell) => [cell])], ...(format ? { formats: { A: format } } : {}) })[0]?.type
+  assert.equal(typed(['2026-11-21', '2026-12-01']), 'date')
+  assert.equal(typed(['2026-11-21 09:30', '2026-12-01T18:00:05']), 'datetime')
+  assert.equal(typed(['9:30', '18:00']), 'time')
+  assert.equal(typed(['37.7749, -122.4194', '-33.86,151.21']), 'latlong')
+  assert.equal(typed(['Open', 'Open', 'Closed', 'Open']), 'enum')
+  assert.equal(typed(['A-1', 'A-2', 'A-3']), 'text')
+  assert.equal(typed([46347], '[$-409]d-mmm-yy'), 'date')
+  assert.equal(typed([46347.5], 'yyyy-mm-dd hh:mm'), 'datetime')
+  assert.equal(typed([12], '#,##0.00 [$€-407]'), 'price')
+  assert.equal(typed([12], '#,##0 "days"'), 'number')
+})
+
+test('a date and a time go between an input\'s text and the number a spreadsheet keeps', () => {
+  assert.equal(temporalSerial('date', '2026-11-21'), 46347)
+  assert.equal(temporalText('date', 46347), '2026-11-21')
+  assert.equal(temporalSerial('time', '09:00'), 0.375)
+  assert.equal(temporalText('time', 0.375), '09:00')
+  assert.equal(temporalText('time', 46347.75), '18:00')
+  const moment = temporalSerial('datetime', '2026-11-21T09:30') ?? 0
+  assert.ok(Math.abs(moment - (46347 + 9.5 / 24)) < 1e-9)
+  assert.equal(temporalText('datetime', moment), '2026-11-21T09:30')
+  assert.equal(temporalSerial('datetime', '2026-11-21 09:30'), moment)
+  assert.equal(temporalSerial('date', 'soon'), null)
 })
