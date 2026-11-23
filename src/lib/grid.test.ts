@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
-  cellDay, columnLetter, gridColumns, gridDisplay, gridFromJson, gridMarkdown, gridValue, gridWorkbook, normalizeGrid, readGrid, rowViews, sheetCsv,
-  starterGrid, temporalSerial, temporalText,
-  type Grid, type GridColumn, type GridSheet,
+  cellDay, columnLetter, gridColumns, gridDisplay, gridFromJson, gridMarkdown, gridValue, gridWorkbook, normalizeGrid, readGrid, rowMatches, rowTones,
+  rowViews, sheetCsv, starterGrid, temporalSerial, temporalText, withParts,
+  type Grid, type GridCell, type GridColumn, type GridCondition, type GridSheet,
 } from './grid.ts'
 
 const GRID: Grid = {
@@ -197,4 +197,78 @@ test('a sheet gets a view for each kind of data it holds, and a dashboard of two
   assert.deepEqual(rowViews(columns('text', 'enum', 'date', 'address', 'image')), ['cards', 'chart', 'calendar', 'map', 'gallery', 'dashboard'])
   assert.deepEqual(rowViews(columns('text', 'latlong', 'datetime')), ['cards', 'calendar', 'map', 'dashboard'])
   assert.deepEqual(rowViews(columns('time', 'yesno', 'url', 'longtext')), ['cards'])
+})
+
+test('a sheet keeps its slices and rules, each test and color checked, and its fence writes them back', () => {
+  const grid = normalizeGrid({ title: 'Plans', sheets: [{
+    name: 'Plans',
+    rows: [['Name', 'Kind'], ['Delta Center', 'Show']],
+    slices: [
+      { name: ' Shows ', where: [{ column: 'Kind', op: '=', value: 'Show' }, { column: 'Kind', op: 'like', value: 'x' }, { op: '=' }] },
+      { name: 'shows', where: [] }, { name: '' }, 'not a slice', { name: 'Everything' },
+    ],
+    rules: [
+      { where: [{ column: 'Cost', op: '>', value: 50 }], columns: ['Cost', 3, ''], color: 'red', bold: true },
+      { where: [{ column: 'Kind', op: 'filled', value: null }], color: 'teal' },
+      { color: 'gray', bold: 'yes' },
+    ],
+  }] })
+  const sheet = grid?.sheets[0]
+  assert.deepEqual(sheet?.slices, [{ name: 'Shows', where: [{ column: 'Kind', op: '=', value: 'Show' }] }, { name: 'Everything', where: [] }])
+  assert.deepEqual(sheet?.rules, [
+    { where: [{ column: 'Cost', op: '>', value: 50 }], columns: ['Cost'], color: 'red', bold: true },
+    { where: [], columns: [], color: 'gray' },
+  ])
+  assert.ok(grid)
+  assert.deepEqual(gridFromJson(gridMarkdown(grid).replace(/^```grid\n|\n```$/g, '')), grid)
+  assert.deepEqual(normalizeGrid({ sheets: [{ name: 'Bare', rows: [], slices: [], rules: 'none' }] })?.sheets[0], { name: 'Bare', rows: [] })
+})
+
+test('a sheet read back from the spreadsheet keeps its slices and rules, found by its name', () => {
+  const from: Grid = { title: 'Plans', sheets: [
+    { name: 'Plans', rows: [['Name']], slices: [{ name: 'All', where: [] }], rules: [{ where: [], columns: [], color: 'blue' }] },
+    { name: 'Notes', rows: [['Note']] },
+  ] }
+  const read: Grid = { title: 'Plans', sheets: [{ name: 'Notes', rows: [['Note'], ['Bring tickets']] }, { name: 'Plans', rows: [['Name'], ['Ballet West']] }] }
+  assert.deepEqual(withParts(read, from).sheets, [
+    { name: 'Notes', rows: [['Note'], ['Bring tickets']] },
+    { name: 'Plans', rows: [['Name'], ['Ballet West']], slices: [{ name: 'All', where: [] }], rules: [{ where: [], columns: [], color: 'blue' }] },
+  ])
+})
+
+test('a row passes a test on a cell by the column\'s type: dates by their day, numbers as numbers, text without case or accents', () => {
+  const columns: GridColumn[] = [
+    { name: 'Name', type: 'text', options: [] }, { name: 'Kind', type: 'enum', options: ['Show', 'Park'] },
+    { name: 'Cost', type: 'number', options: [] }, { name: 'Date', type: 'date', options: [] }, { name: 'Open', type: 'yesno', options: [] },
+  ]
+  // Ballet West: a show on 2026-12-05 (a spreadsheet's day number) for 60, open; the cost of a row after it is empty.
+  const ballet: GridCell[] = ['Café Ballet West', 'Show', 60, 46361, true]
+  const shown = ['Café Ballet West', 'Show', '60', '2026-12-05', 'TRUE']
+  const passes = (where: GridCondition[], row = ballet) => rowMatches(where, columns, (c) => row[c], (c) => (row === ballet ? shown[c] ?? '' : String(row[c] ?? '')))
+  assert.equal(passes([{ column: 'kind', op: '=', value: 'show' }]), true)
+  assert.equal(passes([{ column: 'Name', op: 'contains', value: 'cafe ballet' }]), true)
+  assert.equal(passes([{ column: 'Cost', op: '>', value: 50 }, { column: 'Cost', op: '<=', value: '60' }]), true)
+  assert.equal(passes([{ column: 'Cost', op: '<', value: 60 }]), false)
+  assert.equal(passes([{ column: 'Date', op: '>=', value: '2026-12-05' }, { column: 'Date', op: '<', value: '2026-12-06' }]), true)
+  assert.equal(passes([{ column: 'Date', op: '=', value: 46361.5 }]), true)
+  assert.equal(passes([{ column: 'Open', op: '=', value: 'Yes' }]), true)
+  assert.equal(passes([{ column: 'Open', op: '!=', value: true }]), false)
+  assert.equal(passes([{ column: 'Missing', op: 'filled' }]), false)
+  assert.equal(passes([]), true)
+  const later: GridCell[] = ['Liberty Park', 'Park', null, '2026-11-25', false]
+  assert.equal(passes([{ column: 'Cost', op: 'empty' }], later), true)
+  assert.equal(passes([{ column: 'Cost', op: '<', value: 100 }], later), false)
+  assert.equal(passes([{ column: 'Cost', op: '!=', value: 100 }], later), true)
+  assert.equal(passes([{ column: 'Date', op: '<', value: '2026-12-01' }], later), true)
+})
+
+test('a row\'s cells take the color of the last rule the row passes that formats their column, and bold from any', () => {
+  const columns: GridColumn[] = [{ name: 'Name', type: 'text', options: [] }, { name: 'Cost', type: 'number', options: [] }]
+  const row: GridCell[] = ['Delta Center', 85]
+  const tones = rowTones([
+    { where: [{ column: 'Cost', op: '>', value: 50 }], columns: [], color: 'yellow', bold: true },
+    { where: [{ column: 'Cost', op: '>', value: 80 }], columns: ['cost'], color: 'red' },
+    { where: [{ column: 'Cost', op: '>', value: 100 }], columns: [], color: 'gray' },
+  ], columns, (c) => row[c], (c) => String(row[c] ?? ''))
+  assert.deepEqual(tones, [{ color: 'yellow', bold: true }, { color: 'red', bold: true }])
 })

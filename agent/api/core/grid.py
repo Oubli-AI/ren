@@ -16,9 +16,41 @@ import json
 import math
 import re
 from collections.abc import Sequence
-from typing import Final, NotRequired, TypedDict
+from typing import Final, Literal, NotRequired, TypedDict, TypeIs, get_args
 
 GridCell = str | int | float | bool | None
+
+
+#: How a condition tests a cell.
+ConditionOp = Literal["=", "!=", ">", ">=", "<", "<=", "contains", "empty", "filled"]
+RuleColor = Literal["red", "yellow", "green", "blue", "purple", "gray"]
+_OPS: Final[tuple[ConditionOp, ...]] = get_args(ConditionOp)
+_COLORS: Final[tuple[RuleColor, ...]] = get_args(RuleColor)
+
+
+class GridCondition(TypedDict):
+    """A test on a row's cell in the column with that header: ``value`` as the cell keeps it, a date as "2026-11-21"."""
+
+    column: str
+    op: ConditionOp
+    value: NotRequired[str | int | float | bool]
+
+
+class GridSlice(TypedDict):
+    """A named part of a sheet's rows: those that pass every test (AppSheet's slice)."""
+
+    name: str
+    where: list[GridCondition]
+
+
+class GridRule(TypedDict):
+    """The color, and bold, of the cells in ``columns`` (every column when empty) of a row that passes every test
+    (AppSheet's format rule)."""
+
+    where: list[GridCondition]
+    columns: list[str]
+    color: RuleColor
+    bold: NotRequired[bool]
 
 
 class GridSheet(TypedDict):
@@ -26,6 +58,8 @@ class GridSheet(TypedDict):
     rows: list[list[GridCell]]
     #: A column's Excel number format by its letter.
     formats: NotRequired[dict[str, str]]
+    slices: NotRequired[list[GridSlice]]
+    rules: NotRequired[list[GridRule]]
 
 
 class Grid(TypedDict):
@@ -38,7 +72,11 @@ GRID_JSON: Final[str] = (
     '{"title": ..., "sheets": [{"name": ..., "rows": [[...], ...], "formats": {"B": "#,##0"}}]}. The first row of a '
     'sheet is its header; a cell is a number, true or false, text, or a formula as text starting with "=" in A1 '
     'notation ("=SUM(B2:B9)", "=Sheet2!B4*0.2"); "formats" is optional and gives a column\'s Excel number format by '
-    "its letter."
+    'its letter. "slices" is optional and names parts of the rows, each the rows that pass every test: [{"name": '
+    '"Shows", "where": [{"column": "Kind", "op": "=", "value": "Show"}]}]; "rules" is optional and colors the cells of '
+    '"columns" (every column when empty) in a row that passes every test: [{"where": [{"column": "Cost", "op": ">", '
+    '"value": 50}], "columns": ["Cost"], "color": "red", "bold": true}]; "op" is =, !=, >, >=, <, <=, contains, empty '
+    'or filled, a date is written "2026-11-21", and "color" is red, yellow, green, blue, purple or gray.'
 )
 #: How agents write a spreadsheet (the editor's "/" Spreadsheet): read back the same way by ``html_to_markdown``.
 GRID_MARKDOWN: Final[str] = (
@@ -69,40 +107,104 @@ def _cell(value: object) -> GridCell:
     return value if isinstance(value, (str, int, float, bool)) else None
 
 
+def _is_record(value: object) -> TypeIs[dict[str, object]]:
+    """A JSON object, whose keys are text."""
+    return isinstance(value, dict)
+
+
+def _is_list(value: object) -> TypeIs[list[object]]:
+    return isinstance(value, list)
+
+
+def _items(value: object) -> list[object]:
+    """A JSON array's items; none for anything else."""
+    return value if _is_list(value) else []
+
+
+def _text(value: object) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _conditions(value: object) -> list[GridCondition]:
+    kept: list[GridCondition] = []
+    for raw in _items(value):
+        if not _is_record(raw):
+            continue
+        op, column = raw.get("op"), _text(raw.get("column"))
+        if not isinstance(op, str) or op not in _OPS or not column:
+            continue
+        condition: GridCondition = {"column": column, "op": op}
+        tested = _cell(raw.get("value"))
+        if tested is not None:
+            condition["value"] = tested
+        kept.append(condition)
+    return kept
+
+
+def _slices(value: object) -> list[GridSlice]:
+    """A sheet's slices, each with a name of its own."""
+    slices: list[GridSlice] = []
+    taken: set[str] = set()
+    for raw in _items(value):
+        name = _text(raw.get("name"))[:60].strip() if _is_record(raw) else ""
+        if not _is_record(raw) or not name or name.lower() in taken:
+            continue
+        taken.add(name.lower())
+        slices.append({"name": name, "where": _conditions(raw.get("where"))})
+    return slices
+
+
+def _rules(value: object) -> list[GridRule]:
+    rules: list[GridRule] = []
+    for raw in _items(value):
+        if not _is_record(raw):
+            continue
+        color = raw.get("color")
+        if not isinstance(color, str) or color not in _COLORS:
+            continue
+        columns = [name for each in _items(raw.get("columns")) if (name := _text(each))]
+        rule: GridRule = {"where": _conditions(raw.get("where")), "columns": columns, "color": color}
+        if raw.get("bold") is True:
+            rule["bold"] = True
+        rules.append(rule)
+    return rules
+
+
 def normalize_grid(value: object) -> Grid | None:
-    """A grid from JSON anyone wrote: every sheet with a name of its own and rows of plain cells; None when it holds
-    no sheet."""
-    if not isinstance(value, dict) or not isinstance(value.get("sheets"), list):
+    """A grid from JSON anyone wrote: every sheet with a name of its own and rows of plain cells, and its slices and
+    rules with every test and color checked; None when it holds no sheet."""
+    if not _is_record(value):
         return None
     sheets: list[GridSheet] = []
     taken: set[str] = set()
-    for raw in value["sheets"]:
-        if not isinstance(raw, dict):
+    for raw in _items(value.get("sheets")):
+        if not _is_record(raw):
             continue
-        name = raw.get("name")
-        name = _SHEET_NAME_CHARS.sub(" ", name).strip()[:31].strip() if isinstance(name, str) else ""
+        name = _SHEET_NAME_CHARS.sub(" ", _text(raw.get("name"))).strip()[:31].strip()
         number = len(sheets) + 1
         while not name or name.lower() in taken:
             name, number = f"Sheet{number}", number + 1
         taken.add(name.lower())
-        rows = raw.get("rows")
         sheet: GridSheet = {
             "name": name,
-            "rows": [[_cell(cell) for cell in row] for row in rows if isinstance(row, list)]
-            if isinstance(rows, list) else [],
+            "rows": [[_cell(cell) for cell in row] for row in _items(raw.get("rows")) if _is_list(row)],
         }
         formats = raw.get("formats")
         kept = {
             letter: pattern for letter, pattern in formats.items()
-            if isinstance(letter, str) and _COLUMN.fullmatch(letter) and isinstance(pattern, str) and pattern
-        } if isinstance(formats, dict) else {}
+            if _COLUMN.fullmatch(letter) and isinstance(pattern, str) and pattern
+        } if _is_record(formats) else {}
         if kept:
             sheet["formats"] = kept
+        slices, rules = _slices(raw.get("slices")), _rules(raw.get("rules"))
+        if slices:
+            sheet["slices"] = slices
+        if rules:
+            sheet["rules"] = rules
         sheets.append(sheet)
     if not sheets:
         return None
-    title = value.get("title")
-    return {"title": (title.strip()[:120] if isinstance(title, str) else "") or "Spreadsheet", "sheets": sheets}
+    return {"title": _text(value.get("title"))[:120] or "Spreadsheet", "sheets": sheets}
 
 
 def grid_from_json(text: str) -> Grid | None:
@@ -122,6 +224,8 @@ def grid_markdown(grid: Grid) -> str:
     sheets = ",\n".join(
         f'    {{"name": {_json(sheet["name"])}'
         + (f', "formats": {_json(sheet["formats"])}' if "formats" in sheet else "")
+        + (f', "slices": {_json(sheet["slices"])}' if "slices" in sheet else "")
+        + (f', "rules": {_json(sheet["rules"])}' if "rules" in sheet else "")
         + ', "rows": [\n'
         + ",\n".join(f"      {_json(row)}" for row in sheet["rows"])
         + "\n    ]}"

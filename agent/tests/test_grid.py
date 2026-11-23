@@ -71,6 +71,32 @@ def test_agents_write_a_fence_the_page_keeps_as_a_grid_block_and_read_the_fence_
     assert html_to_markdown(page) == f"Costs by model.\n\n{fence}\n\nDone."
 
 
+def test_a_sheet_keeps_its_slices_and_rules_through_the_page_and_back_to_the_fence() -> None:
+    grid = normalize_grid({"title": "Plans", "sheets": [{
+        "name": "Plans", "rows": [["Name", "Kind"], ["Delta Center", "Show"]],
+        "slices": [
+            {"name": " Shows ", "where": [{"column": "Kind", "op": "=", "value": "Show"}, {"column": "Kind", "op": "like"}, {"op": "="}]},
+            {"name": "shows", "where": []}, {"name": ""}, "not a slice", {"name": "Everything"},
+        ],
+        "rules": [
+            {"where": [{"column": "Cost", "op": ">", "value": 50}], "columns": ["Cost", 3, ""], "color": "red", "bold": True},
+            {"where": [{"column": "Kind", "op": "filled", "value": None}], "color": "teal"},
+            {"color": "gray", "bold": "yes"},
+        ],
+    }]})
+    assert grid is not None
+    sheet = grid["sheets"][0]
+    assert sheet.get("slices") == [{"name": "Shows", "where": [{"column": "Kind", "op": "=", "value": "Show"}]},
+                                   {"name": "Everything", "where": []}]
+    assert sheet.get("rules") == [{"where": [{"column": "Cost", "op": ">", "value": 50}], "columns": ["Cost"], "color": "red", "bold": True},
+                                  {"where": [], "columns": [], "color": "gray"}]
+    fence = grid_markdown(grid)
+    assert '"slices": [{"name": "Shows", "where": [{"column": "Kind", "op": "=", "value": "Show"}]}' in fence
+    assert html_to_markdown(markdown_to_html(f"{fence}\n")) == fence
+    assert normalize_grid({"sheets": [{"name": "Bare", "rows": [], "slices": [], "rules": "none"}]}) == {
+        "title": "Spreadsheet", "sheets": [{"name": "Bare", "rows": []}]}
+
+
 def test_a_grid_the_editor_calculated_reads_back_as_the_grid_not_what_it_shows() -> None:
     shown = grid_block_html(_GRID).replace("<td>=B2*C2</td>", "<td>$4,500.00</td>")
     for marks in ('data-calculated=""', 'data-calculated="" data-workbook="{&quot;sheetOrder&quot;:[&quot;sheet-1&quot;]}"'):
