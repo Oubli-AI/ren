@@ -3,7 +3,7 @@ import { test } from 'node:test'
 import {
   cellDay, columnLetter, gridColumns, gridDisplay, gridFromJson, gridMarkdown, gridValue, gridWorkbook, normalizeGrid, readGrid, rowMatches, rowTones,
   rowViews, sheetCsv, starterGrid, temporalSerial, temporalText, withParts,
-  type Grid, type GridCell, type GridColumn, type GridCondition, type GridSheet,
+  type Grid, type GridBot, type GridCell, type GridColumn, type GridCondition, type GridSheet,
 } from './grid.ts'
 
 const GRID: Grid = {
@@ -224,16 +224,34 @@ test('a sheet keeps its slices and rules, each test and color checked, and its f
   assert.deepEqual(normalizeGrid({ sheets: [{ name: 'Bare', rows: [], slices: [], rules: 'none' }] })?.sheets[0], { name: 'Bare', rows: [] })
 })
 
-test('a sheet read back from the spreadsheet keeps its slices and rules, found by its name', () => {
+test('a sheet read back from the spreadsheet keeps its slices, rules and bots, found by its name', () => {
+  const bots: GridBot[] = [{ name: 'New plan', ask: 'Find tickets for it.', on: 'added' }]
   const from: Grid = { title: 'Plans', sheets: [
-    { name: 'Plans', rows: [['Name']], slices: [{ name: 'All', where: [] }], rules: [{ where: [], columns: [], color: 'blue' }] },
+    { name: 'Plans', rows: [['Name']], slices: [{ name: 'All', where: [] }], rules: [{ where: [], columns: [], color: 'blue' }], bots },
     { name: 'Notes', rows: [['Note']] },
   ] }
   const read: Grid = { title: 'Plans', sheets: [{ name: 'Notes', rows: [['Note'], ['Bring tickets']] }, { name: 'Plans', rows: [['Name'], ['Ballet West']] }] }
   assert.deepEqual(withParts(read, from).sheets, [
     { name: 'Notes', rows: [['Note'], ['Bring tickets']] },
-    { name: 'Plans', rows: [['Name'], ['Ballet West']], slices: [{ name: 'All', where: [] }], rules: [{ where: [], columns: [], color: 'blue' }] },
+    { name: 'Plans', rows: [['Name'], ['Ballet West']], slices: [{ name: 'All', where: [] }], rules: [{ where: [], columns: [], color: 'blue' }], bots },
   ])
+})
+
+test('a sheet keeps bots with an event or a schedule, a schedule filled out as a new one is, as the server does', () => {
+  const grid = normalizeGrid({ title: 't', sheets: [{ name: 'S', rows: [['A']], bots: [
+    { name: ' Adds ', on: 'added', ask: ' go ', slice: 'Hot' },
+    { name: 'adds', on: 'changed', ask: 'same name' },
+    { name: 'No ask', on: 'added', ask: ' ' },
+    { name: 'Bad event', on: 'deleted', ask: 'go' },
+    { name: 'Daily', schedule: { every: 'day', time: '07:30', cron: '*' }, ask: 'go' },
+    { name: 'Bad schedule', schedule: { every: 'month' }, ask: 'go' },
+  ] }] })
+  assert.deepEqual(grid?.sheets[0]?.bots, [
+    { name: 'Adds', ask: 'go', on: 'added', slice: 'Hot' },
+    { name: 'Daily', ask: 'go', schedule: { every: 'day', hours: 24, time: '07:30', weekday: 0, timezone: 'UTC' } },
+  ])
+  assert.ok(grid)
+  assert.deepEqual(gridFromJson(gridMarkdown(grid).replace(/^```grid\n|\n```$/g, '')), grid)
 })
 
 test('a row passes a test on a cell by the column\'s type: dates by their day, numbers as numbers, text without case or accents', () => {

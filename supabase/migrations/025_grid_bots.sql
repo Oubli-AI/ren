@@ -2,8 +2,8 @@
 -- A bot lives in a page's spreadsheet (its grid's `bots`). One that runs on a schedule is kept here for the user who
 -- saved the page last, with when it is next due; the Ren API claims a due row by moving `next_run_at` forward with a
 -- compare-and-set, as it does `agent_schedules`, and drops the row once the page no longer holds the bot.
--- A bot's run is an `agent_runs` row like a scheduled agent's: with Ren (no `agent_id`) or the user's saved agent,
--- `trigger` 'bot' when rows added or changed started it, and the bot's name in `bot`.
+-- A bot's run is an `agent_runs` row like a scheduled agent's, with Ren (no `agent_id`): `trigger` 'bot' when rows added
+-- or changed started it, 'schedule' on its schedule, and the bot's name in `bot`.
 -- The Ren API writes with the service-role key and filters by owner_id; RLS lets a signed-in user read their own bots.
 create table public.grid_bots (
  id uuid primary key default gen_random_uuid(),

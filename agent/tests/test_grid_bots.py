@@ -65,17 +65,17 @@ def with_rows(grid: Grid, rows: list[list[GridCell]]) -> Grid:
 
 def test_normalize_keeps_bots_with_an_event_or_a_valid_schedule_and_drops_the_rest():
     grid = normalize_grid({"title": "t", "sheets": [{"name": "S", "rows": [["A"]], "bots": [
-        {"name": "Adds", "on": "added", "ask": "go", "slice": "Hot", "agent": "a1"},
+        {"name": "Adds", "on": "added", "ask": "go", "slice": "Hot"},
         {"name": "adds", "on": "changed", "ask": "same name"},
         {"name": "No ask", "on": "added", "ask": " "},
         {"name": "Bad event", "on": "deleted", "ask": "go"},
-        {"name": "Daily", "schedule": {"every": "day", "time": "08:00", "timezone": "UTC", "cron": "*"}, "ask": "go"},
+        {"name": "Daily", "schedule": {"every": "day", "time": "07:30", "cron": "*"}, "ask": "go"},
         {"name": "Bad schedule", "schedule": {"every": "month"}, "ask": "go"},
     ]}]})
     assert grid is not None
     assert grid["sheets"][0].get("bots") == [
-        {"name": "Adds", "ask": "go", "on": "added", "slice": "Hot", "agent": "a1"},
-        {"name": "Daily", "ask": "go", "schedule": {"every": "day", "time": "08:00", "timezone": "UTC"}},
+        {"name": "Adds", "ask": "go", "on": "added", "slice": "Hot"},
+        {"name": "Daily", "ask": "go", "schedule": {"every": "day", "hours": 24, "time": "07:30", "weekday": 0, "timezone": "UTC"}},
     ]
 
 
@@ -234,8 +234,6 @@ class Scheduler(AgentScheduler):
     async def run(self, owner: str, agent_id: str | None, *, task: str = "", cadence: Cadence | None = None,
                   trigger: Literal["schedule", "manual", "bot"] = "manual", bot: str = "",
                   prompt: str = "") -> dict[str, Any]:
-        if agent_id not in (None, "mine"):
-            raise LookupError("That specialist agent does not exist")
         self.started.append((owner, agent_id, bot, trigger))
         self.prompts.append(prompt)
         return {"id": f"run-{len(self.started)}"}
@@ -257,15 +255,14 @@ AFTER_SHOWN = [SHOWN[0], ["Delta Center", "Show", "$95.00", "2026-11-24", "104.5
 
 
 @pytest.mark.asyncio
-async def test_a_save_keeps_its_scheduled_bots_and_starts_the_bots_it_meets_with_ren_for_an_agent_not_the_savers():
+async def test_a_save_keeps_its_scheduled_bots_and_starts_ren_for_each_bot_it_meets():
     tables: Tables = {}
     scheduler = Scheduler(tables)
-    bots: list[GridBot] = [*GRID["sheets"][0].get("bots", []), {"name": "Theirs", "on": "added", "ask": "Tell Sam.", "agent": "sams"},
-                           {"name": "Mine", "on": "changed", "ask": "Price it.", "agent": "mine"}]
+    bots: list[GridBot] = [*GRID["sheets"][0].get("bots", []), {"name": "Either", "on": "added or changed", "ask": "Price it."}]
     before, after = with_bots(GRID, bots), with_bots(with_rows(GRID, AFTER), bots)
     await saved(scheduler, "u1", "doc1", block(before, SHOWN), block(after, AFTER_SHOWN))
     assert [(agent, bot, trigger) for _, agent, bot, trigger in scheduler.started] == [
-        (None, "New plan", "bot"), (None, "Show changed", "bot"), (None, "Theirs", "bot"), ("mine", "Mine", "bot")]
+        (None, "New plan", "bot"), (None, "Show changed", "bot"), (None, "Either", "bot")]
     assert scheduler.prompts[0].startswith("New plan · Outings\n\nFind tickets for it.\n\nRows added on the sheet")
     assert "| Red Butte | Park | $14.00 | 2026-11-26 | 15.4 |" in scheduler.prompts[0]
     [kept] = tables["grid_bots"]
@@ -282,7 +279,7 @@ async def test_a_save_keeps_its_scheduled_bots_and_starts_the_bots_it_meets_with
     assert datetime.fromisoformat(tables["grid_bots"][0]["next_run_at"]) - datetime.fromisoformat(due) == timedelta(hours=1)
     await saved(scheduler, "u2", "doc1", block(later, AFTER_SHOWN), block(with_bots(after, []), AFTER_SHOWN))
     assert tables["grid_bots"] == []
-    assert len(scheduler.started) == 4
+    assert len(scheduler.started) == 3
 
 
 @pytest.mark.asyncio

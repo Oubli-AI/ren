@@ -1,6 +1,5 @@
 """Spreadsheet bots, after AppSheet's (https://support.google.com/appsheet/answer/11998993): a sheet's ``bots``
-(``GridBot`` in ``grid.py``) start Ren, or one of the user's saved agents, with the sheet's rows when rows are added or
-changed, or on a schedule.
+(``GridBot`` in ``grid.py``) start Ren with the sheet's rows when rows are added or changed, or on a schedule.
 
 A person's save of a page (``PATCH /projects/documents/{id}``) hands ``saved`` the page's grid blocks before and after
 it: each grid as written (``data-grid``) and, once the editor's spreadsheet has calculated it, what each cell shows (the
@@ -15,8 +14,8 @@ user who saved the page last. ``start_due`` (on the scheduler's loop) claims eac
 schedule, reads its page with the service-role key once that user can still open it, and starts the bot with its
 sheet's rows; a bot the page no longer holds is let go.
 
-A run is the scheduler's (``AgentScheduler.run``): a panel session and an ``agent_runs`` row the Context widget
-notifies about, with Ren, or the bot's agent when it is the user's.
+A run is the scheduler's (``AgentScheduler.run``): a panel session with Ren and an ``agent_runs`` row the Context
+widget notifies about.
 """
 
 from __future__ import annotations
@@ -31,7 +30,7 @@ from typing import Any, Final, Literal
 
 from bs4 import BeautifulSoup
 
-from agent.api.core.agent_schedules import RUN_PROMPT, AgentBusy, AgentScheduler, Cadence, cadence_label, next_run
+from agent.api.core.agent_schedules import RUN_PROMPT, AgentScheduler, Cadence, cadence_label, next_run
 from agent.api.core.grid import (
     GridBot, GridCell, GridSheet, column_types, grid_from_json, row_matches, shown_value,
 )
@@ -189,13 +188,8 @@ def event_bots(before: Sequence[PageSheet], after: Sequence[PageSheet]) -> list[
 
 async def _start(scheduler: AgentScheduler, owner: str, page: PageSheet, bot: GridBot, rows: Sequence[int], *,
                  why: str, what: str, trigger: Literal["bot", "schedule"]) -> None:
-    prompt = bot_prompt(page, bot, rows, why=why, what=what)
-    agent = bot.get("agent") or None
-    try:
-        _ = await scheduler.run(owner, agent, bot=bot["name"], prompt=prompt, trigger=trigger)
-    except LookupError:
-        # The agent isn't this user's (another person saved the page) or is gone: Ren does it.
-        _ = await scheduler.run(owner, None, bot=bot["name"], prompt=prompt, trigger=trigger)
+    _ = await scheduler.run(owner, None, bot=bot["name"], prompt=bot_prompt(page, bot, rows, why=why, what=what),
+                            trigger=trigger)
 
 
 async def _sync(scheduler: AgentScheduler, owner: str, document_id: str, sheets: Sequence[PageSheet]) -> None:
@@ -235,8 +229,6 @@ async def saved(scheduler: AgentScheduler, owner: str, document_id: str, before:
         try:
             await _start(scheduler, owner, page, bot, rows, why=f"by the bot \"{bot['name']}\" when rows were saved",
                          what=what, trigger="bot")
-        except AgentBusy as busy:
-            logger.info("document=<%s>, bot=<%s> | %s; this change is skipped", document_id, bot["name"], busy)
         except Exception:
             logger.exception("document=<%s>, bot=<%s> | bot did not start", document_id, bot["name"])
 
@@ -283,8 +275,6 @@ async def start_due(scheduler: AgentScheduler) -> int:
                          why=f"by the bot \"{bot['name']}\" on its schedule ({cadence_label(cadence)})",
                          what="The rows", trigger="schedule")
             started += 1
-        except AgentBusy as busy:
-            logger.info("bot=<%s> | %s; this occurrence is skipped", row["name"], busy)
         except Exception:
             logger.exception("bot=<%s>, document=<%s> | scheduled bot did not start", row["name"], row["document_id"])
     return started

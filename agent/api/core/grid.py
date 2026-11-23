@@ -62,15 +62,14 @@ _EVERY: Final[tuple[str, ...]] = ("hours", "day", "weekdays", "week")
 
 
 class GridBot(TypedDict):
-    """A sheet's bot (AppSheet's bot): on ``on``, or on ``schedule`` (a scheduled agent's cadence), Ren, or the user's
-    saved agent ``agent``, does ``ask`` with the rows, those of ``slice`` when it names one (``grid_bots.py``)."""
+    """A sheet's bot (AppSheet's bot): on ``on``, or on ``schedule`` (a scheduled agent's cadence), Ren does ``ask``
+    with the rows, those of ``slice`` when it names one (``grid_bots.py``)."""
 
     name: str
     ask: str
     on: NotRequired[BotEvent]
     schedule: NotRequired[dict[str, str | int]]
     slice: NotRequired[str]
-    agent: NotRequired[str]
 
 
 class GridSheet(TypedDict):
@@ -97,7 +96,8 @@ GRID_JSON: Final[str] = (
     '"Shows", "where": [{"column": "Kind", "op": "=", "value": "Show"}]}]; "rules" is optional and colors the cells of '
     '"columns" (every column when empty) in a row that passes every test: [{"where": [{"column": "Cost", "op": ">", '
     '"value": 50}], "columns": ["Cost"], "color": "red", "bold": true}]; "op" is =, !=, >, >=, <, <=, contains, empty '
-    'or filled, a date is written "2026-11-21", and "color" is red, yellow, green, blue, purple or gray.'
+    'or filled, a date is written "2026-11-21", and "color" is red, yellow, green, blue, purple or gray. "bots" is '
+    'optional and is set by the person in the spreadsheet: keep it as it is.'
 )
 #: How agents write a spreadsheet (the editor's "/" Spreadsheet): read back the same way by ``html_to_markdown``.
 GRID_MARKDOWN: Final[str] = (
@@ -191,13 +191,20 @@ def _rules(value: object) -> list[GridRule]:
     return rules
 
 
+def _whole(value: object, default: int) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) else default
+
+
 def _schedule(value: object) -> dict[str, str | int] | None:
-    """A bot's cadence as JSON keeps it; ``Cadence`` checks it when the bot is kept to run."""
-    if not _is_record(value) or value.get("every") not in _EVERY:
+    """A bot's schedule from JSON anyone wrote: a scheduled agent's cadence, with what it leaves out as a new one has
+    it (``defaultCadence``); ``Cadence`` checks it when the bot is kept to run."""
+    if not _is_record(value):
         return None
-    return {key: each for key, each in value.items()
-            if key in ("every", "hours", "time", "weekday", "timezone")
-            and (isinstance(each, str) or (isinstance(each, int) and not isinstance(each, bool)))}
+    every, time, timezone = value.get("every"), value.get("time"), value.get("timezone")
+    if not isinstance(every, str) or every not in _EVERY:
+        return None
+    return {"every": every, "hours": _whole(value.get("hours"), 24), "time": time if isinstance(time, str) and time else "08:00",
+            "weekday": _whole(value.get("weekday"), 0), "timezone": timezone if isinstance(timezone, str) and timezone else "UTC"}
 
 
 def _bots(value: object) -> list[GridBot]:
@@ -219,8 +226,6 @@ def _bots(value: object) -> list[GridBot]:
             bot["on"] = on
         if part := _text(raw.get("slice")):
             bot["slice"] = part
-        if agent := _text(raw.get("agent")):
-            bot["agent"] = agent
         bots.append(bot)
     return bots
 
