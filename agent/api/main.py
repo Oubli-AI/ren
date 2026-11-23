@@ -67,12 +67,15 @@ async def lifespan(app: FastAPI):
     repairs.bind_emitter(chat.repair_emitter(manager))
     app.state.tool_repairs = repairs
     chat.bind_repair_service(repairs)
-    # Saved specialists run at the cadence their owner picked, each run a panel session on this runtime
-    # (core/agent_schedules.py); the Context widget shows finished runs as notifications.
+    # Saved specialists run at the cadence their owner picked, and a spreadsheet's scheduled bots at theirs, each run a
+    # panel session on this runtime (core/agent_schedules.py, core/grid_bots.py); the Context widget shows finished
+    # runs as notifications.
     from agent.api.core.agent_schedules import AgentScheduler, bind_scheduler
     from agent.api.core.config import AGENT_SCHEDULE_TICK_SECONDS, AGENT_SCHEDULES_ENABLED
+    from agent.api.core.grid_bots import start_due
 
-    schedules = AgentScheduler(manager, tick=AGENT_SCHEDULE_TICK_SECONDS, enabled=AGENT_SCHEDULES_ENABLED)
+    schedules = AgentScheduler(manager, tick=AGENT_SCHEDULE_TICK_SECONDS, enabled=AGENT_SCHEDULES_ENABLED,
+                               also_due=(start_due,))
     app.state.agent_scheduler = schedules
     bind_scheduler(schedules)
     schedules.start()

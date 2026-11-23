@@ -27,6 +27,7 @@ import asyncio
 import logging
 import os
 import uuid
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime, time as day_time, timedelta
 from typing import Any, Final, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -140,6 +141,11 @@ def run_summary(messages: list[dict[str, Any]]) -> str:
     return ""
 
 
+def _run_name(name: str, bot: str) -> str:
+    """Who a run's notification names: the agent, and the spreadsheet bot that started it."""
+    return f"{name} · {bot}" if bot else name
+
+
 def _error_text(error: Any) -> str:
     if not error:
         return ""
@@ -163,10 +169,12 @@ class AgentBusy(RuntimeError):
 class AgentScheduler:
     """Starts saved specialists on their schedules and records every run (see the module docstring)."""
 
-    def __init__(self, manager: Any, *, tick: float = 30.0, enabled: bool = True) -> None:
+    def __init__(self, manager: Any, *, tick: float = 30.0, enabled: bool = True,
+                 also_due: Sequence[Callable[[AgentScheduler], Awaitable[int]]] = ()) -> None:
         self._manager = manager
         self._tick = tick
         self._enabled = enabled
+        self._also_due = also_due
         self._client: Any = None
         self._client_lock = asyncio.Lock()
         self._loop: asyncio.Task[None] | None = None
@@ -218,10 +226,11 @@ class AgentScheduler:
 
     async def runs(self, owner: str, *, limit: int = 30) -> list[dict[str, Any]]:
         rows = (await (await self.client()).table(RUNS)
-                .select("id,agent_id,session_id,trigger,status,summary,error,started_at,finished_at,seen_at,harness_agents(name)")
+                .select("id,agent_id,session_id,trigger,bot,status,summary,error,started_at,finished_at,seen_at,harness_agents(name)")
                 .eq("owner_id", owner).order("started_at", desc=True).limit(limit).execute()).data
         return [{**{key: value for key, value in row.items() if key != "harness_agents"},
-                 "agent_name": (row.get("harness_agents") or {}).get("name", "")} for row in rows]
+                 "agent_name": _run_name(row["harness_agents"]["name"] if row["agent_id"] else "Ren", row["bot"])}
+                for row in rows]
 
     async def mark_seen(self, owner: str, run_id: str) -> bool:
         rows = (await (await self.client()).table(RUNS).update({"seen_at": _iso(datetime.now(UTC))})
@@ -233,21 +242,23 @@ class AgentScheduler:
                 .eq("status", "running").limit(1).execute()).data
         return bool(rows)
 
-    async def run(self, owner: str, agent_id: str, *, task: str = "", cadence: Cadence | None = None,
-                  trigger: Literal["schedule", "manual"] = "manual") -> dict[str, Any]:
-        """Start one run of the specialist on a new panel session; returns its ``agent_runs`` row.
+    async def run(self, owner: str, agent_id: str | None, *, task: str = "", cadence: Cadence | None = None,
+                  trigger: Literal["schedule", "manual", "bot"] = "manual", bot: str = "",
+                  prompt: str = "") -> dict[str, Any]:
+        """Start one run of the specialist, or of Ren when ``agent_id`` is None, on a new panel session; returns its
+        ``agent_runs`` row. A spreadsheet bot (``grid_bots.py``) names itself in ``bot`` and writes its own ``prompt``.
 
-        The selection is what the Agent Panel pins when Chat starts a specialist conversation: the panel destination,
-        the specialist, the default chat model and browser, the default runtime options.
+        The selection is what the Agent Panel pins when Chat starts a conversation: the panel destination, Ren or the
+        specialist, the default chat model and browser, the default runtime options.
         """
         from agent.api.core.panel_agent import default_selection
         from agent.api.core.panel_browser import default_browser
         from agent.api.endpoints.chat import RuntimeOptions
 
-        agent = await self._agent(owner, agent_id)
+        agent = await self._agent(owner, agent_id) if agent_id is not None else {"name": "Ren", "description": ""}
         if agent is None:
             raise LookupError("That specialist agent does not exist")
-        if await self._running(owner, agent_id):
+        if agent_id is not None and await self._running(owner, agent_id):
             raise AgentBusy(f"{agent['name']} is already running")
         chosen = default_selection()
         if chosen is None:
@@ -255,22 +266,24 @@ class AgentScheduler:
         provider, model_id = chosen
         session_id = f"agent-{uuid.uuid4()}"
         row = (await (await self.client()).table(RUNS).insert(
-            {"owner_id": owner, "agent_id": agent_id, "session_id": session_id, "trigger": trigger}).execute()).data[0]
-        prompt = run_prompt(name=agent["name"], description=agent.get("description") or "", task=task, cadence=cadence)
+            {"owner_id": owner, "agent_id": agent_id, "session_id": session_id, "trigger": trigger, "bot": bot}).execute()).data[0]
+        message = prompt or run_prompt(name=agent["name"], description=agent.get("description") or "", task=task,
+                                       cadence=cadence)
+        target = {"kind": "specialist", "id": agent_id} if agent_id is not None else {"kind": "ron"}
         try:
             await self._manager.start(
-                owner, session_id, prompt, action="message",
-                selection={"agent": {"kind": "specialist", "id": agent_id}, "provider": provider, "model_id": model_id,
+                owner, session_id, message, action="message",
+                selection={"agent": target, "provider": provider, "model_id": model_id,
                            "reasoning_effort": None, "browser": default_browser()},
                 options=RuntimeOptions().model_dump(),
             )
         except Exception as error:
             await self._finish(row["id"], "failed", error=_error_text(error))
             raise
-        logger.info("owner=<%s>, agent_id=<%s>, name=<%s>, session=<%s>, trigger=<%s> | specialist run started",
-                    owner, agent_id, agent["name"], session_id, trigger)
+        logger.info("owner=<%s>, agent_id=<%s>, name=<%s>, bot=<%s>, session=<%s>, trigger=<%s> | run started",
+                    owner, agent_id, agent["name"], bot, session_id, trigger)
         self._watch(row["id"], owner, session_id)
-        return {**row, "agent_name": agent["name"]}
+        return {**row, "agent_name": _run_name(agent["name"], bot)}
 
     def _watch(self, run_id: str, owner: str, session_id: str) -> None:
         if run_id in self._watchers:
@@ -309,7 +322,8 @@ class AgentScheduler:
     # ------------------------------------------------------------------ loop
 
     async def check(self) -> int:
-        """Start every enabled schedule that is due; returns how many runs started."""
+        """Start every enabled schedule that is due, then what ``also_due`` finds due (a spreadsheet's scheduled bots,
+        ``grid_bots.py``); returns how many runs started."""
         client = await self.client()
         now = datetime.now(UTC)
         due = (await client.table(SCHEDULES).select("agent_id,owner_id,cadence,task,next_run_at")
@@ -336,6 +350,8 @@ class AgentScheduler:
                 logger.info("agent_id=<%s> | %s; this occurrence is skipped", row["agent_id"], busy)
             except Exception:
                 logger.exception("agent_id=<%s> | scheduled run did not start", row["agent_id"])
+        for start_due in self._also_due:
+            started += await start_due(self)
         return started
 
     async def _resume(self) -> None:
