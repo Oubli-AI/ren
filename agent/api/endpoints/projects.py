@@ -5,12 +5,13 @@ from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from agent.api.core import document_export
 from agent.api.core.document_export import ExportFormat
 from agent.api.core.grid import XLSX_MEDIA_TYPE, GridCell, grid_xlsx, normalize_grid
+from agent.api.core.grid_bots import saved
 from agent.api.core.projects import ProjectIdentity, ProjectService, project_identity
 
 router = APIRouter(prefix="/projects")
@@ -413,7 +414,6 @@ async def move_document(document_id: UUID, body: DocumentMove, identity: Identit
     return await ProjectService(identity).move_document(str(document_id), str(body.project_id))
 
 
-@router.patch("/documents/{document_id}")
 async def update_document(document_id: UUID, body: DocumentUpdate, identity: Identity):
     rows = await ProjectService(identity).request("PATCH", "project_documents",
         params={"id": f"eq.{document_id}", "version": f"eq.{body.version}"},
@@ -421,6 +421,23 @@ async def update_document(document_id: UUID, body: DocumentUpdate, identity: Ide
     if not rows:
         raise HTTPException(409, "This page changed elsewhere or access was removed. Reload before saving again.")
     return rows[0]
+
+
+@router.patch("/documents/{document_id}")
+async def save_document(document_id: UUID, body: DocumentUpdate, identity: Identity, request: Request,
+                        background: BackgroundTasks):
+    """A person's save: ``update_document``, then, after the response, the spreadsheet bots it meets
+    (core/grid_bots.py) against the page as the saved version held it. Ren's own saves (workspace_tools.py) start
+    none, so no run starts itself again; guests have no runs."""
+    scheduler = getattr(request.app.state, "agent_scheduler", None)
+    before = None
+    if scheduler is not None and body.content is not None and "bots" in body.content and not identity.guest:
+        held = await ProjectService(identity).rows("project_documents", select="content,version", id=f"eq.{document_id}")
+        before = (held[0].get("content") or "") if held and held[0].get("version") == body.version else None
+    page = await update_document(document_id, body, identity)
+    if scheduler is not None and before is not None and body.content is not None:
+        background.add_task(saved, scheduler, identity.user_id, str(document_id), before, body.content)
+    return page
 
 
 @router.delete("/documents/{document_id}")

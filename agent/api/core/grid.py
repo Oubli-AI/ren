@@ -15,7 +15,9 @@ import io
 import json
 import math
 import re
+import unicodedata
 from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
 from typing import Final, Literal, NotRequired, TypedDict, TypeIs, get_args
 
 GridCell = str | int | float | bool | None
@@ -53,6 +55,23 @@ class GridRule(TypedDict):
     bold: NotRequired[bool]
 
 
+#: What starts a bot that isn't scheduled: rows added, changed, or either (AppSheet's data change event).
+BotEvent = Literal["added", "changed", "added or changed"]
+_EVENTS: Final[tuple[BotEvent, ...]] = get_args(BotEvent)
+_EVERY: Final[tuple[str, ...]] = ("hours", "day", "weekdays", "week")
+
+
+class GridBot(TypedDict):
+    """A sheet's bot (AppSheet's bot): on ``on``, or on ``schedule`` (a scheduled agent's cadence), Ren does ``ask``
+    with the rows, those of ``slice`` when it names one (``grid_bots.py``)."""
+
+    name: str
+    ask: str
+    on: NotRequired[BotEvent]
+    schedule: NotRequired[dict[str, str | int]]
+    slice: NotRequired[str]
+
+
 class GridSheet(TypedDict):
     name: str
     rows: list[list[GridCell]]
@@ -60,6 +79,7 @@ class GridSheet(TypedDict):
     formats: NotRequired[dict[str, str]]
     slices: NotRequired[list[GridSlice]]
     rules: NotRequired[list[GridRule]]
+    bots: NotRequired[list[GridBot]]
 
 
 class Grid(TypedDict):
@@ -76,7 +96,8 @@ GRID_JSON: Final[str] = (
     '"Shows", "where": [{"column": "Kind", "op": "=", "value": "Show"}]}]; "rules" is optional and colors the cells of '
     '"columns" (every column when empty) in a row that passes every test: [{"where": [{"column": "Cost", "op": ">", '
     '"value": 50}], "columns": ["Cost"], "color": "red", "bold": true}]; "op" is =, !=, >, >=, <, <=, contains, empty '
-    'or filled, a date is written "2026-11-21", and "color" is red, yellow, green, blue, purple or gray.'
+    'or filled, a date is written "2026-11-21", and "color" is red, yellow, green, blue, purple or gray. "bots" is '
+    'optional and is set by the person in the spreadsheet: keep it as it is.'
 )
 #: How agents write a spreadsheet (the editor's "/" Spreadsheet): read back the same way by ``html_to_markdown``.
 GRID_MARKDOWN: Final[str] = (
@@ -170,9 +191,48 @@ def _rules(value: object) -> list[GridRule]:
     return rules
 
 
+def _whole(value: object, default: int) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) else default
+
+
+def _schedule(value: object) -> dict[str, str | int] | None:
+    """A bot's schedule from JSON anyone wrote: a scheduled agent's cadence, with what it leaves out as a new one has
+    it (``defaultCadence``); ``Cadence`` checks it when the bot is kept to run."""
+    if not _is_record(value):
+        return None
+    every, time, timezone = value.get("every"), value.get("time"), value.get("timezone")
+    if not isinstance(every, str) or every not in _EVERY:
+        return None
+    return {"every": every, "hours": _whole(value.get("hours"), 24), "time": time if isinstance(time, str) and time else "08:00",
+            "weekday": _whole(value.get("weekday"), 0), "timezone": timezone if isinstance(timezone, str) and timezone else "UTC"}
+
+
+def _bots(value: object) -> list[GridBot]:
+    """A sheet's bots, each with a name of its own, something to do, and an event or a schedule."""
+    bots: list[GridBot] = []
+    taken: set[str] = set()
+    for raw in _items(value):
+        if not _is_record(raw):
+            continue
+        name, ask, on = _text(raw.get("name"))[:60].strip(), _text(raw.get("ask"))[:2000], raw.get("on")
+        schedule = _schedule(raw.get("schedule"))
+        if not name or not ask or name.lower() in taken or (schedule is None and (not isinstance(on, str) or on not in _EVENTS)):
+            continue
+        taken.add(name.lower())
+        bot: GridBot = {"name": name, "ask": ask}
+        if schedule is not None:
+            bot["schedule"] = schedule
+        elif isinstance(on, str) and on in _EVENTS:
+            bot["on"] = on
+        if part := _text(raw.get("slice")):
+            bot["slice"] = part
+        bots.append(bot)
+    return bots
+
+
 def normalize_grid(value: object) -> Grid | None:
-    """A grid from JSON anyone wrote: every sheet with a name of its own and rows of plain cells, and its slices and
-    rules with every test and color checked; None when it holds no sheet."""
+    """A grid from JSON anyone wrote: every sheet with a name of its own and rows of plain cells, and its slices,
+    rules and bots with every test, color and event checked; None when it holds no sheet."""
     if not _is_record(value):
         return None
     sheets: list[GridSheet] = []
@@ -196,11 +256,13 @@ def normalize_grid(value: object) -> Grid | None:
         } if _is_record(formats) else {}
         if kept:
             sheet["formats"] = kept
-        slices, rules = _slices(raw.get("slices")), _rules(raw.get("rules"))
+        slices, rules, bots = _slices(raw.get("slices")), _rules(raw.get("rules")), _bots(raw.get("bots"))
         if slices:
             sheet["slices"] = slices
         if rules:
             sheet["rules"] = rules
+        if bots:
+            sheet["bots"] = bots
         sheets.append(sheet)
     if not sheets:
         return None
@@ -226,6 +288,7 @@ def grid_markdown(grid: Grid) -> str:
         + (f', "formats": {_json(sheet["formats"])}' if "formats" in sheet else "")
         + (f', "slices": {_json(sheet["slices"])}' if "slices" in sheet else "")
         + (f', "rules": {_json(sheet["rules"])}' if "rules" in sheet else "")
+        + (f', "bots": {_json(sheet["bots"])}' if "bots" in sheet else "")
         + ', "rows": [\n'
         + ",\n".join(f"      {_json(row)}" for row in sheet["rows"])
         + "\n    ]}"
@@ -271,6 +334,128 @@ def with_grid_blocks(page_html: str) -> str:
         return grid_block_html(grid) if grid else match.group(0)
 
     return _GRID_FENCE.sub(block, page_html)
+
+
+_NUMERIC: Final[re.Pattern[str]] = re.compile(r"-?\d+(?:\.\d+)?")
+_US_DATE: Final[re.Pattern[str]] = re.compile(r"(\d{1,2})/(\d{1,2})/(\d{4})")
+_ISO_DATE: Final[re.Pattern[str]] = re.compile(r"\d{4}-\d{2}-\d{2}")
+_ISO_DATETIME: Final[re.Pattern[str]] = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?")
+#: 1970-01-01 as a spreadsheet counts days, from 1899-12-30.
+_EPOCH: Final[int] = 25_569
+
+
+def shown_value(text: str) -> GridCell:
+    """A formula's result from what its cell shows: a number without its currency, grouping, sign in brackets or
+    percent sign, TRUE or FALSE, a date as "2026-11-21", or the text."""
+    shown = text.strip()
+    if not shown:
+        return None
+    if shown in ("TRUE", "FALSE"):
+        return shown == "TRUE"
+    plain = re.sub(r"[$€£¥,\s]", "", shown)
+    negative = plain.startswith("(") and plain.endswith(")")
+    plain = plain.strip("()")
+    percent = plain.endswith("%")
+    plain = plain.removesuffix("%")
+    if _NUMERIC.fullmatch(plain):
+        number = float(plain) * (-1 if negative else 1) / (100 if percent else 1)
+        return int(number) if number.is_integer() else number
+    if day := _US_DATE.fullmatch(shown):
+        return f"{day[3]}-{int(day[1]):02d}-{int(day[2]):02d}"
+    return shown
+
+
+def fold(text: str) -> str:
+    """Text as a search compares it: without case or accents (``fold`` in ``src/lib/grid.ts``)."""
+    return "".join(char for char in unicodedata.normalize("NFD", text) if not unicodedata.category(char).startswith("M")).lower()
+
+
+def cell_day(cell: GridCell) -> str | None:
+    """The day a date falls on ("2026-11-21"), from a cell kept as a spreadsheet number or as text (``cellDay``)."""
+    if isinstance(cell, str):
+        return cell[:10] if _ISO_DATE.match(cell) else None
+    if isinstance(cell, bool) or not isinstance(cell, (int, float)):
+        return None
+    try:
+        return (datetime(1970, 1, 1, tzinfo=UTC) + timedelta(milliseconds=round((cell - _EPOCH) * 86_400_000))).date().isoformat()
+    except OverflowError:
+        return None
+
+
+def _number_type(format_code: str | None) -> str:
+    """A column of numbers by its number format, as ``numberType`` reads it; only a date's matters to a test."""
+    if not format_code or "%" in format_code:
+        return "number"
+    codes = re.sub(r'"[^"]*"|\[[^\]]*\]', "", format_code).lower()
+    day, hour = re.search(r"[yd]", codes) is not None, re.search(r"[hs]", codes) is not None
+    return "datetime" if day and hour else "date" if day else "number"
+
+
+def column_types(sheet: GridSheet, held: Sequence[Sequence[GridCell]]) -> list[tuple[str, str]]:
+    """Each column's header and the type a test compares it by (``gridColumns``): yes or no, a date, a date and
+    time, or anything else, from ``held`` (the rows' cells, a formula as its result)."""
+    header = sheet["rows"][0] if sheet["rows"] else []
+    width = max((len(row) for row in sheet["rows"]), default=0)
+    columns: list[tuple[str, str]] = []
+    for c in range(width):
+        name = _shown(header[c] if c < len(header) else None).strip() or column_letter(c)
+        cells = [row[c] for row in held[1:] if c < len(row) and row[c] is not None and row[c] != ""]
+        texts = [cell for cell in cells if isinstance(cell, str)]
+        if cells and all(isinstance(cell, bool) for cell in cells):
+            kind = "yesno"
+        elif cells and all(isinstance(cell, (int, float)) and not isinstance(cell, bool) for cell in cells):
+            kind = _number_type(sheet.get("formats", {}).get(column_letter(c)))
+        elif cells and len(texts) == len(cells) and all(_ISO_DATE.fullmatch(text) for text in texts):
+            kind = "date"
+        elif cells and len(texts) == len(cells) and all(_ISO_DATETIME.fullmatch(text) for text in texts):
+            kind = "datetime"
+        else:
+            kind = "text"
+        columns.append((name, kind))
+    return columns
+
+
+def _compare(kind: str, held: GridCell, tested: str | int | float | bool, shown: str) -> int:
+    """Below 0 when the cell is less than the tested value, 0 when they are the same (``compare``)."""
+    if kind in ("date", "datetime"):
+        day = cell_day(held) or ""
+        other = (cell_day(tested) or "") if isinstance(tested, (int, float)) and not isinstance(tested, bool) else str(tested)[:10]
+        return (day > other) - (day < other)
+    number = (float(tested) if isinstance(tested, (int, float)) and not isinstance(tested, bool)
+              else float(str(tested).strip()) if _NUMERIC.fullmatch(str(tested).strip()) else None)
+    if isinstance(held, (int, float)) and not isinstance(held, bool) and number is not None:
+        return (held > number) - (held < number)
+    if kind == "yesno":
+        return int(held is True) - int(tested is True or re.fullmatch(r"yes|true", str(tested), re.IGNORECASE) is not None)
+    left, right = fold(shown), fold(str(tested))
+    return (left > right) - (left < right)
+
+
+def row_matches(where: Sequence[GridCondition], columns: Sequence[tuple[str, str]], held: Sequence[GridCell],
+                shown: Sequence[str]) -> bool:
+    """Whether a row passes every test (``rowMatches``): ``held`` gives its cells (a formula as its result),
+    ``shown`` what each shows."""
+    for condition in where:
+        c = next((index for index, (name, _) in enumerate(columns) if fold(name) == fold(condition["column"])), -1)
+        if c < 0:
+            return False
+        cell = held[c] if c < len(held) else None
+        text = shown[c] if c < len(shown) else _shown(cell)
+        op, tested = condition["op"], condition.get("value")
+        empty = cell is None or cell == ""
+        if op in ("empty", "filled"):
+            passed = empty == (op == "empty")
+        elif empty or tested is None:
+            passed = op == "!="
+        elif op == "contains":
+            passed = fold(str(tested)) in fold(text)
+        else:
+            order = _compare(columns[c][1], cell, tested, text)
+            passed = {"=": order == 0, "!=": order != 0, ">": order > 0, ">=": order >= 0, "<": order < 0,
+                      "<=": order <= 0}[op]
+        if not passed:
+            return False
+    return True
 
 
 def grid_xlsx(grid: Grid, values: Sequence[Sequence[Sequence[GridCell]]] = ()) -> bytes:
