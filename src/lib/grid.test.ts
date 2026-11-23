@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
-  columnLetter, gridColumns, gridDisplay, gridFromJson, gridMarkdown, gridValue, gridWorkbook, normalizeGrid, readGrid, sheetCsv, starterGrid,
-  temporalSerial, temporalText,
-  type Grid, type GridSheet,
+  cellDay, columnLetter, gridColumns, gridDisplay, gridFromJson, gridMarkdown, gridValue, gridWorkbook, normalizeGrid, readGrid, rowViews, sheetCsv,
+  starterGrid, temporalSerial, temporalText,
+  type Grid, type GridColumn, type GridSheet,
 } from './grid.ts'
 
 const GRID: Grid = {
@@ -177,4 +177,24 @@ test('a date and a time go between an input\'s text and the number a spreadsheet
   assert.equal(temporalText('datetime', moment), '2026-11-21T09:30')
   assert.equal(temporalSerial('datetime', '2026-11-21 09:30'), moment)
   assert.equal(temporalSerial('date', 'soon'), null)
+})
+
+test('a date cell falls on a day, whether a spreadsheet keeps it as a number or as text', () => {
+  assert.equal(cellDay(46347), '2026-11-21')
+  assert.equal(cellDay(46347.75), '2026-11-21')
+  assert.equal(cellDay('2026-11-21'), '2026-11-21')
+  assert.equal(cellDay('2026-11-21 09:30'), '2026-11-21')
+  assert.equal(cellDay('soon'), null)
+  assert.equal(cellDay(true), null)
+  assert.equal(cellDay(null), null)
+  assert.equal(cellDay(1e20), null)
+})
+
+test('a sheet gets a view for each kind of data it holds, and a dashboard of two or more', () => {
+  const columns = (...types: GridColumn['type'][]): GridColumn[] => types.map((type) => ({ name: type, type, options: [] }))
+  assert.deepEqual(rowViews(columns('text', 'email', 'phone')), ['cards'])
+  assert.deepEqual(rowViews(columns('text', 'price')), ['cards', 'chart'])
+  assert.deepEqual(rowViews(columns('text', 'enum', 'date', 'address', 'image')), ['cards', 'chart', 'calendar', 'map', 'gallery', 'dashboard'])
+  assert.deepEqual(rowViews(columns('text', 'latlong', 'datetime')), ['cards', 'calendar', 'map', 'dashboard'])
+  assert.deepEqual(rowViews(columns('time', 'yesno', 'url', 'longtext')), ['cards'])
 })
